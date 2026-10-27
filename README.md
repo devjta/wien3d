@@ -6,6 +6,13 @@ Works with keyboard & mouse, on phones and tablets (install it to your home scre
 
 No API keys, no accounts, no paid map services. Everything comes from **free open data** that the City of Vienna and Austria published for everyone. ❤️
 
+| | |
+| --- | --- |
+| ![Stephansdom](docs/screenshots/stephansdom.jpeg) | ![Riesenrad and Prater](docs/screenshots/prater.jpeg) |
+| Stephansdom | Riesenrad & Prater |
+| ![Schönbrunn](docs/screenshots/schoenbrunn.jpeg) | ![Rathaus](docs/screenshots/rathaus.jpeg) |
+| Schönbrunn | Rathaus |
+
 ## What's in it
 
 - 🏙️ **Every building in Vienna** with real roof shapes (the city's LOD2 roof model), streamed in chunks as you move

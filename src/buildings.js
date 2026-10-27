@@ -145,6 +145,7 @@ export function buildTrees(features, b, terrain) {
   crowns.computeBoundingSphere();
   const group = new THREE.Group();
   trunks.userData = crowns.userData = { pick: 'tree', items };
+  crowns.castShadow = crowns.receiveShadow = trunks.castShadow = true;
   group.add(trunks, crowns);
   group.userData.dispose = () => {
     trunks.dispose();

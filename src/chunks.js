@@ -13,8 +13,41 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 function pickable(mesh, kind) {
   mesh.geometry.computeBoundsTree();
   mesh.userData.pick = kind;
+  mesh.castShadow = mesh.receiveShadow = true;
   return mesh;
 }
+
+// Walls: Viennese plaster tones per facade plane plus a procedural window grid that fades out with distance.
+const facadeMaterial = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+facadeMaterial.onBeforeCompile = (s) => {
+  s.vertexShader = s.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;\nvarying vec3 vWNrm;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(position, 1.0)).xyz;\nvWNrm = mat3(modelMatrix) * normal;');
+  s.fragmentShader = s.fragmentShader
+    .replace(
+      '#include <common>',
+      `#include <common>
+varying vec3 vWPos;
+varying vec3 vWNrm;
+float fhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }`
+    )
+    .replace(
+      '#include <color_fragment>',
+      `#include <color_fragment>
+vec2 nh = normalize(vWNrm.xz + 1e-5);
+float along = dot(vWPos.xz, vec2(-nh.y, nh.x));
+float plane = dot(vWPos.xz, nh);
+float h = fhash(vec2(floor(plane * 0.5), floor(along / 60.0)));
+vec3 plaster = h < 0.3 ? vec3(0.86, 0.82, 0.74) : h < 0.5 ? vec3(0.90, 0.80, 0.58) : h < 0.65 ? vec3(0.80, 0.80, 0.78)
+  : h < 0.8 ? vec3(0.88, 0.76, 0.70) : vec3(0.93, 0.91, 0.87);
+plaster *= 0.82;
+vec2 cell = vec2(along / 3.4, vWPos.y / 3.6);
+vec2 f = fract(cell);
+float win = step(0.32, f.x) * step(f.x, 0.68) * step(0.28, f.y) * step(f.y, 0.78);
+float fade = smoothstep(0.12, 0.45, max(fwidth(cell.x), fwidth(cell.y)));
+diffuseColor.rgb = mix(mix(plaster, vec3(0.22, 0.24, 0.27), win * 0.7), plaster * 0.88, fade);`
+    );
+};
 
 // A chunk is one z16 web-mercator tile (~407 m wide in Vienna).
 export const CZ = 16;
@@ -25,7 +58,7 @@ const GROUND_SEG = 48;
 
 // basemap.at orthophoto (free, no key)
 const ORTHO = (z, x, y) => `https://mapsneu.wien.gv.at/basemap/bmaporthofoto30cm/normal/google3857/${z}/${y}/${x}.jpeg`;
-const orthoZoomFor = (d) => (d <= 2 ? 18 : d <= 4 ? 17 : 16);
+const orthoZoomFor = (d) => (d <= 1 ? 19 : d <= 2 ? 18 : d <= 4 ? 17 : 16);
 
 class Scheduler {
   constructor(limit) {
@@ -141,7 +174,16 @@ function splitByTile(src, b) {
     return a;
   };
   const cx = (x) => Math.floor((x - b.xMin) / b.size), cz = (z) => Math.floor((z - b.zMin) / b.size);
+  const walls = [];
   for (let t = 0; t < p.length; t += 9) {
+    // steep faces get the facade material: a top-down photo would only smear into vertical streaks there
+    const ax = p[t + 3] - p[t], ay = p[t + 4] - p[t + 1], az = p[t + 5] - p[t + 2];
+    const bx = p[t + 6] - p[t], by = p[t + 7] - p[t + 1], bz = p[t + 8] - p[t + 2];
+    const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    if (Math.abs(ny) < 0.3 * Math.hypot(nx, ny, nz)) {
+      for (let i = 0; i < 9; i++) walls.push(p[t + i]);
+      continue;
+    }
     const x0 = cx(Math.min(p[t], p[t + 3], p[t + 6])), x1 = cx(Math.max(p[t], p[t + 3], p[t + 6]));
     const z0 = cz(Math.min(p[t + 2], p[t + 5], p[t + 8])), z1 = cz(Math.max(p[t + 2], p[t + 5], p[t + 8]));
     if (x0 === x1 && z0 === z1) {
@@ -159,16 +201,22 @@ function splitByTile(src, b) {
         for (let i = 1; i + 1 < poly.length; i++) out(dx, dy).push(...poly[0], ...poly[i], ...poly[i + 1]);
       }
   }
+  if (walls.length) cells.set('wall', walls);
   let n = 0;
   for (const a of cells.values()) n += a.length / 3;
   const pos = new Float32Array(n * 3), uv = new Float32Array(n * 2), list = [];
   const g = new THREE.BufferGeometry();
   let v = 0;
   for (const [k, a] of cells) {
-    const [dx, dy] = k.split(',').map(Number);
-    const xa = b.xMin + dx * b.size, za = b.zMin + dy * b.size;
     g.addGroup(v, a.length / 3, list.length);
     pos.set(a, v * 3);
+    if (k === 'wall') {
+      v += a.length / 3; // facade shader works in world space, uv stays 0
+      list.push(null);
+      continue;
+    }
+    const [dx, dy] = k.split(',').map(Number);
+    const xa = b.xMin + dx * b.size, za = b.zMin + dy * b.size;
     for (let i = 0; i < a.length; i += 3, v++) (uv[v * 2] = (a[i] - xa) / b.size), (uv[v * 2 + 1] = 1 - (a[i + 2] - za) / b.size);
     list.push([dx, dy]);
   }
@@ -272,6 +320,7 @@ class Chunk {
     g.computeVertexNormals();
     this.ground = new THREE.Mesh(g, this.material);
     this.ground.userData.pick = 'ground';
+    this.ground.receiveShadow = true;
     this.group.add(this.ground);
     this.touch();
   }
@@ -321,7 +370,7 @@ class Chunk {
   orthoMesh(geometry) {
     const { geometry: g, cells } = splitByTile(geometry, this.b);
     geometry.dispose();
-    const mats = cells.map(([dx, dy]) => this.mgr.chunks.get(`${this.x + dx},${this.y + dy}`)?.material ?? this.material);
+    const mats = cells.map((c) => (c ? this.mgr.chunks.get(`${this.x + c[0]},${this.y + c[1]}`)?.material ?? this.material : facadeMaterial));
     return new THREE.Mesh(g, mats);
   }
 

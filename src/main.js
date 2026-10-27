@@ -21,6 +21,10 @@ const SKY = 0xb8d3ea;
 const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -29,10 +33,25 @@ scene.fog = new THREE.Fog(SKY, 900, 2600);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 6000);
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8478, 2.2));
-const sun = new THREE.DirectionalLight(0xfff4e0, 1.4);
-sun.position.set(-0.5, 1, 0.35);
-scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xdbe8ff, 0x6e665a, 1.0));
+const sun = new THREE.DirectionalLight(0xffe9cc, 3.0);
+const SUN_DIR = new THREE.Vector3(-0.6, 0.65, 0.45).normalize();
+// shadows only around the player: a 700 m box that follows the camera (see followSun)
+const SHADOW_R = 350;
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);
+Object.assign(sun.shadow.camera, { left: -SHADOW_R, right: SHADOW_R, top: SHADOW_R, bottom: -SHADOW_R, near: 1, far: 3000 });
+sun.shadow.bias = -0.0005;
+sun.shadow.normalBias = 0.6;
+scene.add(sun, sun.target);
+const texel = (2 * SHADOW_R) / 4096;
+function followSun() {
+  // centre a bit ahead of the camera, snapped to shadow texels so edges don't shimmer while flying
+  const c = camera.getWorldDirection(new THREE.Vector3()).setY(0).multiplyScalar(SHADOW_R * 0.5).add(camera.position);
+  c.set(Math.round(c.x / texel) * texel, Math.round(c.y / texel) * texel, Math.round(c.z / texel) * texel);
+  sun.target.position.copy(c);
+  sun.position.copy(c).addScaledVector(SUN_DIR, 1500);
+}
 
 const terrain = new Terrain();
 const collision = new Collision();
@@ -461,6 +480,7 @@ function frame(now) {
   info.update(dt, player.active || shot);
   updateHud(now);
   compass.update(player.yaw);
+  followSun();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
