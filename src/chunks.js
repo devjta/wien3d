@@ -17,37 +17,24 @@ function pickable(mesh, kind) {
   return mesh;
 }
 
-// Walls: Viennese plaster tones per facade plane plus a procedural window grid that fades out with distance.
-const facadeMaterial = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
-facadeMaterial.onBeforeCompile = (s) => {
-  s.vertexShader = s.vertexShader
-    .replace('#include <common>', '#include <common>\nvarying vec3 vWPos;\nvarying vec3 vWNrm;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWPos = (modelMatrix * vec4(position, 1.0)).xyz;\nvWNrm = mat3(modelMatrix) * normal;');
-  s.fragmentShader = s.fragmentShader
-    .replace(
-      '#include <common>',
-      `#include <common>
-varying vec3 vWPos;
-varying vec3 vWNrm;
-float fhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }`
-    )
-    .replace(
-      '#include <color_fragment>',
-      `#include <color_fragment>
-vec2 nh = normalize(vWNrm.xz + 1e-5);
-float along = dot(vWPos.xz, vec2(-nh.y, nh.x));
-float plane = dot(vWPos.xz, nh);
-float h = fhash(vec2(floor(plane * 0.5), floor(along / 60.0)));
-vec3 plaster = h < 0.3 ? vec3(0.86, 0.82, 0.74) : h < 0.5 ? vec3(0.90, 0.80, 0.58) : h < 0.65 ? vec3(0.80, 0.80, 0.78)
-  : h < 0.8 ? vec3(0.88, 0.76, 0.70) : vec3(0.93, 0.91, 0.87);
-plaster *= 0.82;
-vec2 cell = vec2(along / 3.4, vWPos.y / 3.6);
-vec2 f = fract(cell);
-float win = step(0.32, f.x) * step(f.x, 0.68) * step(0.28, f.y) * step(f.y, 0.78);
-float fade = smoothstep(0.12, 0.45, max(fwidth(cell.x), fwidth(cell.y)));
-diffuseColor.rgb = mix(mix(plaster, vec3(0.22, 0.24, 0.27), win * 0.7), plaster * 0.88, fade);`
+// Walls would only see the ortho's edge pixels smeared top to bottom; a coarse mip instead gives each wall the
+// averaged real colour of its surroundings (slightly desaturated, roofs dominate the photo).
+function wallMaterial() {
+  const m = new THREE.MeshLambertMaterial({ color: 0x8a8f86, side: THREE.DoubleSide });
+  m.onBeforeCompile = (s) => {
+    // mip with ~64 texels per tile (~6 m each), whatever zoom is loaded
+    s.fragmentShader = s.fragmentShader.replace(
+      '#include <map_fragment>',
+      `#ifdef USE_MAP
+  vec4 wallSample = textureLod(map, vMapUv, max(0.0, log2(float(textureSize(map, 0).x) / 64.0)));
+  // brighter: the averaged photo includes cast shadows and dark roof parts
+  diffuseColor.rgb *= min(vec3(1.0), 1.35 * mix(vec3(dot(wallSample.rgb, vec3(0.299, 0.587, 0.114))), wallSample.rgb, 0.75));
+#endif`
     );
-};
+  };
+  m.customProgramCacheKey = () => 'wall';
+  return m;
+}
 
 // A chunk is one z16 web-mercator tile (~407 m wide in Vienna).
 export const CZ = 16;
@@ -166,28 +153,24 @@ function clipPoly(poly, axis, v, s) {
  */
 function splitByTile(src, b) {
   const p = src.attributes.position.array;
-  const cells = new Map(); // "dx,dy" -> positions
-  const out = (dx, dy) => {
-    const k = `${dx},${dy}`;
+  const cells = new Map(); // "dx,dy,wall" -> positions
+  const out = (dx, dy, w) => {
+    const k = `${dx},${dy},${w}`;
     let a = cells.get(k);
     if (!a) cells.set(k, (a = []));
     return a;
   };
   const cx = (x) => Math.floor((x - b.xMin) / b.size), cz = (z) => Math.floor((z - b.zMin) / b.size);
-  const walls = [];
   for (let t = 0; t < p.length; t += 9) {
-    // steep faces get the facade material: a top-down photo would only smear into vertical streaks there
+    // steep faces get the wall material of their tile (see wallMaterial)
     const ax = p[t + 3] - p[t], ay = p[t + 4] - p[t + 1], az = p[t + 5] - p[t + 2];
     const bx = p[t + 6] - p[t], by = p[t + 7] - p[t + 1], bz = p[t + 8] - p[t + 2];
     const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-    if (Math.abs(ny) < 0.3 * Math.hypot(nx, ny, nz)) {
-      for (let i = 0; i < 9; i++) walls.push(p[t + i]);
-      continue;
-    }
+    const w = Math.abs(ny) < 0.3 * Math.hypot(nx, ny, nz) ? 1 : 0;
     const x0 = cx(Math.min(p[t], p[t + 3], p[t + 6])), x1 = cx(Math.max(p[t], p[t + 3], p[t + 6]));
     const z0 = cz(Math.min(p[t + 2], p[t + 5], p[t + 8])), z1 = cz(Math.max(p[t + 2], p[t + 5], p[t + 8]));
     if (x0 === x1 && z0 === z1) {
-      for (let i = 0; i < 9; i++) out(x0, z0).push(p[t + i]);
+      for (let i = 0; i < 9; i++) out(x0, z0, w).push(p[t + i]);
       continue;
     }
     const tri = [[p[t], p[t + 1], p[t + 2]], [p[t + 3], p[t + 4], p[t + 5]], [p[t + 6], p[t + 7], p[t + 8]]];
@@ -198,10 +181,9 @@ function splitByTile(src, b) {
         poly = clipPoly(poly, 0, xa + b.size, -1);
         poly = clipPoly(poly, 2, za, 1);
         poly = clipPoly(poly, 2, za + b.size, -1);
-        for (let i = 1; i + 1 < poly.length; i++) out(dx, dy).push(...poly[0], ...poly[i], ...poly[i + 1]);
+        for (let i = 1; i + 1 < poly.length; i++) out(dx, dy, w).push(...poly[0], ...poly[i], ...poly[i + 1]);
       }
   }
-  if (walls.length) cells.set('wall', walls);
   let n = 0;
   for (const a of cells.values()) n += a.length / 3;
   const pos = new Float32Array(n * 3), uv = new Float32Array(n * 2), list = [];
@@ -210,15 +192,10 @@ function splitByTile(src, b) {
   for (const [k, a] of cells) {
     g.addGroup(v, a.length / 3, list.length);
     pos.set(a, v * 3);
-    if (k === 'wall') {
-      v += a.length / 3; // facade shader works in world space, uv stays 0
-      list.push(null);
-      continue;
-    }
-    const [dx, dy] = k.split(',').map(Number);
+    const [dx, dy, w] = k.split(',').map(Number);
     const xa = b.xMin + dx * b.size, za = b.zMin + dy * b.size;
     for (let i = 0; i < a.length; i += 3, v++) (uv[v * 2] = (a[i] - xa) / b.size), (uv[v * 2 + 1] = 1 - (a[i + 2] - za) / b.size);
-    list.push([dx, dy]);
+    list.push([dx, dy, w]);
   }
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
@@ -237,6 +214,7 @@ class Chunk {
     this.abort = new AbortController();
     this.group = new THREE.Group();
     this.material = new THREE.MeshLambertMaterial({ color: 0x8a8f86, side: THREE.DoubleSide });
+    this.wallMaterial = wallMaterial();
     this.textures = new Map(); // zoom -> texture
     this.texLoading = new Set();
     this.prisms = [];
@@ -358,9 +336,11 @@ class Chunk {
     let best = null, bz = -1;
     for (const [z, t] of this.textures) if (z > bz) (bz = z), (best = t);
     if (this.material.map === best) return;
-    this.material.map = best;
-    this.material.color.set(best ? 0xffffff : 0x8a8f86);
-    this.material.needsUpdate = true;
+    for (const m of [this.material, this.wallMaterial]) {
+      m.map = best;
+      m.color.set(best ? 0xffffff : 0x8a8f86);
+      m.needsUpdate = true;
+    }
   }
 
   /**
@@ -370,7 +350,10 @@ class Chunk {
   orthoMesh(geometry) {
     const { geometry: g, cells } = splitByTile(geometry, this.b);
     geometry.dispose();
-    const mats = cells.map((c) => (c ? this.mgr.chunks.get(`${this.x + c[0]},${this.y + c[1]}`)?.material ?? this.material : facadeMaterial));
+    const mats = cells.map(([dx, dy, w]) => {
+      const c = this.mgr.chunks.get(`${this.x + dx},${this.y + dy}`) ?? this;
+      return w ? c.wallMaterial : c.material;
+    });
     return new THREE.Mesh(g, mats);
   }
 
@@ -429,6 +412,7 @@ class Chunk {
     this.ground?.geometry.dispose();
     for (const t of this.textures.values()) t.dispose();
     this.material.dispose();
+    this.wallMaterial.dispose();
   }
 }
 
